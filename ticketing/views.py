@@ -59,10 +59,13 @@ class SubmitTicketAPI(APIView):
         )
 
         # ایجاد تیکت جدید (وضعیت پیش‌فرض NEW)
+        # ایجاد تیکت جدید با ساختار صحیح
         ticket_obj = Ticket.objects.create(
             creator=user,
             fullname=user_info.get("fullname"),
-            location=user_info.get("location"),
+            location_id=user_info.get(
+                "location"
+            ),  # <--- با اضافه شدن _id مشکل کاملاً حل می‌شود
             mobile=user_info.get("mobile"),
             phone=user_info.get("phone"),
             hardware=hardware_obj,
