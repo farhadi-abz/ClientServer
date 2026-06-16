@@ -26,6 +26,7 @@ from ticketing.views import (
 )
 
 urlpatterns = [
+    # path("", admin.site.urls),
     path("admin/", admin.site.urls),
     # اندپوینتی که کلاینت با آن لاگین می‌کند و توکن می‌گیرد:
     path("api/api-token-auth/", CustomAuthToken.as_view(), name="api_token_auth"),

@@ -96,14 +96,7 @@ class TicketMessageInline(admin.TabularInline):
 
 @admin.register(Ticket)
 class TicketAdmin(admin.ModelAdmin):
-    list_display = (
-        "id",
-        "fullname",
-        "location",
-        "status",
-        "current_handler",
-        "created_at",
-    )
+    list_display = ("id", "creator", "current_handler", "status")
     list_filter = ("status", "location", "created_at")
     search_fields = ("fullname", "mobile", "location")
     inlines = [TicketMessageInline]
@@ -131,6 +124,25 @@ class TicketAdmin(admin.ModelAdmin):
                 "current_handler",
             )
         return ()
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        """
+        محدود کردن لیست راهبرها بر اساس نقش کاربر وارد شده
+        """
+        if db_field.name == "current_handler":
+            # اگر کاربر وارد شده مدیر کل (Superuser) نباشد (یعنی راهبر عادی است)
+            if not request.user.is_superuser:
+                from django.contrib.auth.models import User
+
+                # لیست ارجاع را فقط محدود به مدیران کل (Superusers) کن
+                kwargs["queryset"] = User.objects.filter(is_superuser=True)
+            else:
+                # اگر خودِ مدیر کل وارد شده، می‌تواند تیکت را به هر کسی که تیک is_staff دارد ارجاع دهد
+                from django.contrib.auth.models import User
+
+                kwargs["queryset"] = User.objects.filter(is_staff=True)
+
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
 
 @admin.register(HardwareInventory)

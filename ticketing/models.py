@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import User
+from django_jalali.db import models as jmodels  # <--- وارد کردن مدل شمسی
 
 
 class HardwareInventory(models.Model):
@@ -9,7 +10,7 @@ class HardwareInventory(models.Model):
     cpu_model = models.CharField(max_length=200, verbose_name="مدل CPU")
     motherboard = models.CharField(max_length=200, verbose_name="مدل مادربرد")
     ram_size = models.CharField(max_length=50, verbose_name="میزان RAM")
-    last_updated = models.DateTimeField(auto_now=True, verbose_name="آخرین بروزرسانی")
+    last_updated = jmodels.jDateTimeField(auto_now=True, verbose_name="آخرین بروزرسانی")
 
     class Meta:
         verbose_name = "سخت‌افزار"
@@ -88,6 +89,16 @@ class Ticket(models.Model):
     def __str__(self):
         return f"تیکت {self.id} - {self.fullname}"
 
+    def save(self, *args, **kwargs):
+        # اگر راهبر (کارشناس) انتخاب شده باشد و وضعیت تیکت هنوز "جدید" باشد
+        if self.current_handler and self.status == "NEW":
+            self.status = (
+                "ASSIGNED"  # وضعیت خودکار به "ارجاع شده به راهبر" تغییر می‌کند
+            )
+
+        # صدا زدن متد save اصلی جنگو برای ثبت نهایی در دیتابیس
+        super().save(*args, **kwargs)
+
 
 class TicketMessage(models.Model):
     ticket = models.ForeignKey(
@@ -95,7 +106,8 @@ class TicketMessage(models.Model):
     )
     sender = models.ForeignKey(User, on_delete=models.CASCADE, verbose_name="فرستنده")
     message_text = models.TextField(verbose_name="متن پیام")
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name="زمان ارسال")
+    # created_at = models.DateTimeField(auto_now_add=True, verbose_name="زمان ارسال")
+    created_at = jmodels.jDateTimeField(auto_now_add=True, verbose_name="زمان ارسال")
 
     class Meta:
         ordering = ["created_at"]

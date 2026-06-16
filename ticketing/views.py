@@ -96,13 +96,25 @@ class OrganizationalChartAPI(ListAPIView):
     serializer_class = OrgUnitSerializer
 
 
+from rest_framework import serializers
+from .models import Ticket, TicketMessage
+
+
 class TicketMessageSerializer(serializers.ModelSerializer):
     sender_name = serializers.CharField(source="sender.get_full_name", read_only=True)
     is_staff_reply = serializers.BooleanField(source="sender.is_staff", read_only=True)
+    # تبدیل تاریخ به متن شمسی خوانا برای پیام‌ها
+    created_at = serializers.SerializerMethodField()
 
     class Meta:
         model = TicketMessage
         fields = ["id", "sender_name", "message_text", "is_staff_reply", "created_at"]
+
+    def get_created_at(self, obj):
+        # این متد تاریخ را به صورت رشته متنی شمسی (مثلاً: 1405-03-26 15:30) برمی‌گرداند
+        if obj.created_at:
+            return obj.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        return None
 
 
 class UserTicketListSerializer(serializers.ModelSerializer):
@@ -114,9 +126,11 @@ class UserTicketListSerializer(serializers.ModelSerializer):
         read_only=True,
     )
     location_name = serializers.CharField(source="location.__str__", read_only=True)
+    # تبدیل تاریخ به متن شمسی خوانا برای خودِ تیکت
+    created_at = serializers.SerializerMethodField()
 
     class Meta:
-        model = Ticket = Ticket
+        model = Ticket
         fields = [
             "id",
             "fullname",
@@ -127,6 +141,11 @@ class UserTicketListSerializer(serializers.ModelSerializer):
             "messages",
             "created_at",
         ]
+
+    def get_created_at(self, obj):
+        if obj.created_at:
+            return obj.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        return None
 
 
 # ۱. دریافت لیست تمام تیکت‌های خود کاربر همراه با تاریخچه پیام‌ها
