@@ -19,8 +19,10 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QSplitter,
+    QSystemTrayIcon,
+    QStyle,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 
 try:
     import wmi
@@ -38,6 +40,36 @@ class AppMainWindow(QWidget):
         self.my_tickets = []  # ذخیره تیکت‌های دریافت شده از سرور
         self.selected_ticket_id = None
         self.hardware_data = self.fetch_hardware_specs()
+
+        # ۱. ساخت نوار اعلان داخلی (جایگزین QSystemTrayIcon قدیمی)
+        self.notification_bar = QLabel(self)
+        self.notification_bar.setText("🔔 پیام جدیدی دریافت شد!")
+        self.notification_bar.setStyleSheet("""
+            QLabel {
+                background-color: #e3f2fd; /* رنگ آبی ملایم */
+                color: #0d47a1;            /* رنگ متن آبی تیره */
+                padding: 8px;
+                font-size: 13px;
+                font-family: 'B Nazanin', 'Segoe UI', 'Tahoma';
+                border: 1px solid #bbdefb;
+                border-radius: 4px;
+                qproperty-alignment: AlignCenter;
+            }
+        """)
+        self.notification_bar.hide()  # در ابتدا مخفی است تا پیام جدید بیاید
+
+        # ۲. متغیری برای ذخیره تعداد آخرین پیام‌ها
+        self.last_total_messages = 0
+        self.is_first_load = True  # برای جلوگیری از اعلان تکراری در لود اول
+
+        # ۳. ساخت و راه‌اندازی تایمر بررسی پس‌زمینه
+        self.notification_timer = QTimer(self)
+        self.notification_timer.timeout.connect(self.check_for_new_messages)
+
+        # برای تست سریع روی ۵ ثانیه (۵۰۰۰) بگذارید، بعداً تغییر دهید به ۳۰۰۰۰
+        self.notification_timer.start(5000)
+
+        # اجرای ساختار گرافیکی برنامه
         self.setup_ui()
 
     def fetch_hardware_specs(self):
@@ -86,6 +118,10 @@ class AppMainWindow(QWidget):
             "color: #fff; background-color: #2c3e50; padding: 8px; font-weight: bold;"
         )
         main_layout.addWidget(sys_box)
+
+        # 🔔 اضافه شدن نوار اعلان داخلی سیستم به لایوت اصلی (بالای بخش لاگین و تب‌ها)
+        # این نوار در لود اولیه مخفی است و مزاحمتی ایجاد نمی‌کند
+        main_layout.addWidget(self.notification_bar)
 
         # باکس لاگین و احراز هویت اولیه
         auth_layout = QHBoxLayout()
@@ -218,7 +254,15 @@ class AppMainWindow(QWidget):
                 QMessageBox.critical(self, "خطا", "تایید هویت ناموفق بود.")
                 return
 
-            self.token = auth_res.json().get("token")
+            response_data = auth_res.json()
+            self.token = response_data.get("token")
+
+            # 🔐 تشخیص هوشمند راهبر بودن (پاسخ ادمین/سرور را بررسی می‌کنیم)
+            # اگر در پاسخ سرور is_staff فرستاده می‌شود آن را بگیرید، در غیر این صورت موقتاً بر اساس یوزرنیم‌های ادمین ست کنید:
+            self.is_staff = response_data.get("is_staff", False)
+            # نکته تست: اگر سرور هنوز is_staff را برنمی‌گرداند، می‌توانید برای تست بنویسید:
+            # self.is_staff = (username == "admin" or username == "handler1")
+
             headers = {"Authorization": f"Token {self.token}"}
 
             # دانلود چارت سازمانی
@@ -228,7 +272,9 @@ class AppMainWindow(QWidget):
             if chart_res.status_code == 200:
                 self.all_org_data = chart_res.json()
                 self.populate_level1()
-                self.load_user_tickets()  # لود تیکت‌های قبلی در تب دوم
+
+                # 🔄 لود هوشمند تیکت‌ها بر اساس نقش
+                self.load_user_tickets()
 
                 self.tabs.setEnabled(True)
                 self.btn_connect.setText("✓ وارد شد")
@@ -297,23 +343,49 @@ class AppMainWindow(QWidget):
             QMessageBox.critical(self, "خطا", "خطای شبکه.")
 
     def load_user_tickets(self):
+        if not self.token:
+            return
+
         try:
+            # 🔐 بررسی نقش کاربر برای انتخاب URL درست
+            is_current_user_staff = getattr(self, "is_staff", False)
+
+            if is_current_user_staff:
+                # آدرس مخصوص راهبران (کل تیکت‌ها یا تیکت‌های ارجاع شده به این راهبر)
+                # حتما بررسی کنید که در جنگو چه پایانی (Endpoint) برای راهبران گذاشته‌اید، مثلا /api/tickets/ یا /api/handler-tickets/
+                url = f"{SERVER_URL}/api/my-tickets/"  # اگر در سرور منطق این ای‌پی را اصلاح کرده‌اید، همین بماند
+            else:
+                # آدرس مخصوص کاربران عادی
+                url = f"{SERVER_URL}/api/my-tickets/"
+
             res = requests.get(
-                f"{SERVER_URL}/api/my-tickets/",
+                url,
                 headers={"Authorization": f"Token {self.token}"},
                 timeout=5,
             )
+
             if res.status_code == 200:
                 self.my_tickets = res.json()
                 self.list_tickets.clear()
+
                 for ticket in self.my_tickets:
+                    # استفاده از گت برای جلوگیری از خطای کرش در صورت نبود کلید
+                    status_str = ticket.get(
+                        "status_display", ticket.get("status", "---")
+                    )
+                    handler_str = ticket.get("handler_name", "بدون راهبر")
+
                     item = QListWidgetItem(
-                        f"🎫 تیکت {ticket['id']} [{ticket['status_display']}] - راهبر: {ticket['handler_name']}"
+                        f"🎫 تیکت {ticket['id']} [{status_str}] - راهبر: {handler_str}"
                     )
                     item.setData(Qt.ItemDataRole.UserRole, ticket["id"])
                     self.list_tickets.addItem(item)
-        except:
-            pass
+            else:
+                print(f"خطای سرور در لود تیکت‌ها: {res.status_code}")
+
+        except Exception as e:
+            # برداشتن pass برای اینکه در صورت وقوع خطا، متوجه دلیلش بشویم
+            print(f"خطا در متد لود تیکت‌ها: {e}")
 
     def on_ticket_selected(self, item):
         self.selected_ticket_id = item.data(Qt.ItemDataRole.UserRole)
@@ -328,17 +400,57 @@ class AppMainWindow(QWidget):
         )
         self.update_chat_box(ticket)
 
+        # 🔔 ۱. مخفی کردن نوار اعلان، چون کاربر تیکت را باز کرده است
+        self.notification_bar.hide()
+
+        # 🎯 ۲. همگام‌سازی کاملاً یکسان با متد تایمر (شمارش کل پیام‌های موجود در حافظه کلاینت)
+        total_messages_in_memory = 0
+        for t in self.my_tickets:
+            total_messages_in_memory += len(t.get("messages", []))
+
+        # به روزرسانی دقیق شمارنده اصلی
+        self.last_total_messages = total_messages_in_memory
+
     def update_chat_box(self, ticket):
         self.txt_chat_history.clear()
         chat_content = ""
-        for msg in ticket["messages"]:
-            sender_tag = "[کارشناس فناوری]" if msg["is_staff_reply"] else "[شما]"
-            chat_content += f"<b>{sender_tag} {msg['sender_name']}:</b><br>{msg['message_text']}<br><small style='color:gray;'>{msg['created_at'][:16].replace('T', ' ')}</small><br><br>"
+
+        # 🔒 گام اول: استفاده از .get() برای جلوگیری از KeyError در زمان بروزرسانی
+        messages = ticket.get("messages", [])
+
+        # تشخیص نقش کلاینت فعلی برای نمایش درست تگ [شما]
+        is_current_user_staff = getattr(self, "is_staff", False)
+
+        for msg in messages:
+            is_staff_reply = msg.get("is_staff_reply", False)
+            sender_name = msg.get("sender_name", "نامشخص")
+            message_text = msg.get("message_text", "")
+            created_at = msg.get("created_at", "")
+
+            # 🕵️‍♂️ گام دوم: هوشمندسازی تگ فرستنده بر اساس نقش کلاینت باز شده
+            if is_current_user_staff:
+                # اگر کلاینتِ راهبر باز است:
+                sender_tag = "[شما (کارشناس)]" if is_staff_reply else "[کاربر سازمان]"
+            else:
+                # اگر کلاینتِ کاربر عادی باز است:
+                sender_tag = "[کارشناس فناوری]" if is_staff_reply else "[شما]"
+
+            # قالب‌بندی تاریخ
+            time_str = created_at[:16].replace("T", " ") if created_at else ""
+
+            # ساخت ساختار HTML چت
+            chat_content += (
+                f"<b>{sender_tag} {sender_name}:</b><br>"
+                f"{message_text}<br>"
+                f"<small style='color:gray;'>{time_str}</small><br><br>"
+            )
 
         self.txt_chat_history.setHtml(chat_content)
 
-        # اگر تیکت بسته شده باشد، دکمه ارسال پاسخ را قفل می‌کنیم
-        if ticket["status"] == "CLOSED":
+        # مدیریت قفل شدن چت در صورت بسته بودن تیکت
+        # استفاده از .get() برای امنیت بیشتر
+        ticket_status = ticket.get("status", "NEW")
+        if ticket_status == "CLOSED":
             self.txt_reply_msg.setEnabled(False)
             self.txt_reply_msg.setPlaceholderText("این تیکت خاتمه یافته است.")
             self.btn_send_reply.setEnabled(False)
@@ -375,6 +487,90 @@ class AppMainWindow(QWidget):
                 )
         except:
             pass
+
+    def check_for_new_messages(self):
+        if not self.token:
+            return
+
+        import requests
+
+        headers = {"Authorization": f"Token {self.token}"}
+        url = "http://127.0.0.1:8000/api/my-tickets/"
+
+        try:
+            response = requests.get(url, headers=headers, timeout=4)
+            if response.status_code == 200:
+                new_tickets = response.json()
+
+                current_total_messages = 0
+                has_new_unreads = False
+                active_ticket_updated = None
+
+                # شمارش پیام‌ها به همان روش متد کلیک تیکت
+                for ticket in new_tickets:
+                    ticket_messages = ticket.get("messages", [])
+                    current_total_messages += len(ticket_messages)
+
+                    # پیدا کردن دیتای تیکت باز شده روی صفحه
+                    if (
+                        self.selected_ticket_id
+                        and ticket.get("id") == self.selected_ticket_id
+                    ):
+                        active_ticket_updated = ticket
+
+                    # تشخیص اینکه آیا آخرین پیام مال طرف مقابل است یا خیر
+                    if ticket_messages:
+                        last_msg = ticket_messages[-1]
+                        is_staff_reply = last_msg.get("is_staff_reply", False)
+
+                        # اگر تیکت باز شده جاری نیست، وضعیت نوتیفیکیشن را بررسی کن
+                        if ticket.get("id") != self.selected_ticket_id:
+                            if getattr(self, "is_staff", False) and not is_staff_reply:
+                                has_new_unreads = True
+                            elif (
+                                not getattr(self, "is_staff", False) and is_staff_reply
+                            ):
+                                has_new_unreads = True
+
+                # 🔄 الف) به‌روزرسانی زنده و خودکار چت‌باکس بدون نیاز به کلیک مجدد یا دکمه بروزرسانی
+                if active_ticket_updated:
+                    old_ticket = next(
+                        (
+                            t
+                            for t in self.my_tickets
+                            if t.get("id") == self.selected_ticket_id
+                        ),
+                        None,
+                    )
+                    old_msg_count = (
+                        len(old_ticket.get("messages", [])) if old_ticket else 0
+                    )
+                    new_msg_count = len(active_ticket_updated.get("messages", []))
+
+                    if new_msg_count > old_msg_count:
+                        # آپدیت آنی باکس گفتگو
+                        self.update_chat_box(active_ticket_updated)
+
+                # 🔔 ب) مدیریت پایدار نوار اعلان
+                if not self.is_first_load:
+                    # نوار اعلان فقط برای تیکت‌هایی که پشت صحنه هستند ظاهر می‌شود و غیب نخواهد شد
+                    if (
+                        current_total_messages > self.last_total_messages
+                        and has_new_unreads
+                    ):
+                        self.notification_bar.setText(
+                            "🔔 پیام جدیدی در کارتابل دریافت شد!"
+                        )
+                        self.notification_bar.show()
+                else:
+                    self.is_first_load = False
+
+                # جایگزینی لیست قدیمی با لیست جدید دریافتی از سرور
+                self.my_tickets = new_tickets
+                self.last_total_messages = current_total_messages
+
+        except Exception as e:
+            print(f"خطا در بررسی پیام‌های جدید: {e}")
 
 
 if __name__ == "__main__":

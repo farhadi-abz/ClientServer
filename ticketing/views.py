@@ -1,24 +1,23 @@
+from django.contrib.auth import get_user_model
+from rest_framework import status, serializers
 from rest_framework.views import APIView
+from rest_framework.generics import ListAPIView
 from rest_framework.response import Response
-from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.authtoken.views import ObtainAuthToken
 from rest_framework.authtoken.models import Token
-from .models import HardwareInventory, Ticket, TicketMessage
-from rest_framework.generics import ListAPIView
-from rest_framework.permissions import IsAuthenticated
-from .models import OrganizationalUnit
 from rest_framework.serializers import ModelSerializer
-from rest_framework import serializers
-from .models import Ticket, TicketMessage, OrganizationalUnit
-from rest_framework.generics import ListAPIView
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+
+# امپورت مدل‌ها و سریالایزر تفکیک‌شده
+from .models import HardwareInventory, Ticket, TicketMessage, OrganizationalUnit
+from .serializers import UserTicketListSerializer
+
+User = get_user_model()
 
 
-# ۱. دریافت توکن برای کلاینت (لاگین)
+# ==========================================
+# ۱. سیستم احراز هویت اختصاصی با نقش کاربر
+# ==========================================
 class CustomAuthToken(ObtainAuthToken):
     def post(self, request, *args, **kwargs):
         serializer = self.serializer_class(
@@ -27,10 +26,21 @@ class CustomAuthToken(ObtainAuthToken):
         serializer.is_valid(raise_exception=True)
         user = serializer.validated_data["user"]
         token, created = Token.objects.get_or_create(user=user)
-        return Response({"token": token.key, "username": user.username})
+
+        # ارسال توکن به همراه وضعیت راهبر بودن کاربر برای کلاینت
+        return Response(
+            {
+                "token": token.key,
+                "user_id": user.pk,
+                "email": user.email,
+                "is_staff": user.is_staff,
+            }
+        )
 
 
-# ۲. دریافت تیکت و مشخصات سخت‌افزاری کلاینت
+# ==========================================
+# ۲. ثبت تیکت جدید به همراه اطلاعات سخت‌افزاری
+# ==========================================
 class SubmitTicketAPI(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -58,14 +68,11 @@ class SubmitTicketAPI(APIView):
             },
         )
 
-        # ایجاد تیکت جدید (وضعیت پیش‌فرض NEW)
         # ایجاد تیکت جدید با ساختار صحیح
         ticket_obj = Ticket.objects.create(
             creator=user,
             fullname=user_info.get("fullname"),
-            location_id=user_info.get(
-                "location"
-            ),  # <--- با اضافه شدن _id مشکل کاملاً حل می‌شود
+            location_id=user_info.get("location"),
             mobile=user_info.get("mobile"),
             phone=user_info.get("phone"),
             hardware=hardware_obj,
@@ -83,95 +90,74 @@ class SubmitTicketAPI(APIView):
         )
 
 
+# ==========================================
+# ۳. نمودار و چارت سازمانی
+# ==========================================
 class OrgUnitSerializer(ModelSerializer):
     class Meta:
         model = OrganizationalUnit
         fields = ["id", "name", "parent"]
 
 
-# اندپوینت دریافت چارت سازمانی برای کلاینت
 class OrganizationalChartAPI(ListAPIView):
-    permission_classes = [IsAuthenticated]  # فقط کاربران لاگین شده دسترسی دارند
+    permission_classes = [IsAuthenticated]
     queryset = OrganizationalUnit.objects.all()
     serializer_class = OrgUnitSerializer
 
 
-from rest_framework import serializers
-from .models import Ticket, TicketMessage
-
-
-class TicketMessageSerializer(serializers.ModelSerializer):
-    sender_name = serializers.CharField(source="sender.get_full_name", read_only=True)
-    is_staff_reply = serializers.BooleanField(source="sender.is_staff", read_only=True)
-    # تبدیل تاریخ به متن شمسی خوانا برای پیام‌ها
-    created_at = serializers.SerializerMethodField()
-
-    class Meta:
-        model = TicketMessage
-        fields = ["id", "sender_name", "message_text", "is_staff_reply", "created_at"]
-
-    def get_created_at(self, obj):
-        # این متد تاریخ را به صورت رشته متنی شمسی (مثلاً: 1405-03-26 15:30) برمی‌گرداند
-        if obj.created_at:
-            return obj.created_at.strftime("%Y-%m-%d %H:%M:%S")
-        return None
-
-
-class UserTicketListSerializer(serializers.ModelSerializer):
-    messages = TicketMessageSerializer(many=True, read_only=True)
-    status_display = serializers.CharField(source="get_status_display", read_only=True)
-    handler_name = serializers.CharField(
-        source="current_handler.get_full_name",
-        default="در انتظار ارجاع",
-        read_only=True,
-    )
-    location_name = serializers.CharField(source="location.__str__", read_only=True)
-    # تبدیل تاریخ به متن شمسی خوانا برای خودِ تیکت
-    created_at = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Ticket
-        fields = [
-            "id",
-            "fullname",
-            "location_name",
-            "status",
-            "status_display",
-            "handler_name",
-            "messages",
-            "created_at",
-        ]
-
-    def get_created_at(self, obj):
-        if obj.created_at:
-            return obj.created_at.strftime("%Y-%m-%d %H:%M:%S")
-        return None
-
-
-# ۱. دریافت لیست تمام تیکت‌های خود کاربر همراه با تاریخچه پیام‌ها
+# ==========================================
+# ۴. کارتابل هوشمند نمایش تیکت‌ها (اصلاح تکرار و خطای ۵۰۰)
+# ==========================================
 class UserTicketsListView(ListAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = UserTicketListSerializer
 
     def get_queryset(self):
-        # کاربر فقط و فقط تیکت‌های خودش را می‌بیند
-        return Ticket.objects.filter(creator=self.request.user).order_by("-created_at")
+        user = self.request.user
+        try:
+            # ۱. اگر کاربر «مدیر کل» یا سوپریوزر باشد -> کل تیکت‌های سیستم را برای ارجاع مدیریت کند
+            if user.is_superuser:
+                return Ticket.objects.all().order_by("-id")
+
+            # ۲. اگر کاربر «راهبر/کارشناس عادی» باشد -> فقط تیکت‌هایی که به خودش ارجاع شده را ببیند
+            elif user.is_staff:
+                # فرض می‌کنیم نام فیلد کارشناس در مدل شما current_handler یا handler است
+                if hasattr(Ticket, "current_handler"):
+                    return Ticket.objects.filter(current_handler=user).order_by("-id")
+                elif hasattr(Ticket, "handler"):
+                    return Ticket.objects.filter(handler=user).order_by("-id")
+                return Ticket.objects.none()
+
+            # ۳. اگر کاربر معمولی باشد -> فقط تیکت‌های خودش را ببیند
+            else:
+                return Ticket.objects.filter(creator=user).order_by("-id")
+
+        except Exception as e:
+            print(f"❌ Error in get_queryset: {e}")
+            return Ticket.objects.none()
 
 
-# ۲. ارسال پیام جدید (پاسخ) توسط کاربر روی تیکت موجود
+# ==========================================
+# ۵. ارسال پاسخ هوشمند (اصلاح دسترسی راهبر برای چت)
+# ==========================================
 class SendReplyAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, ticket_id):
+        user = request.user
         try:
-            ticket = Ticket.objects.get(id=ticket_id, creator=request.user)
+            # هوشمندسازی: اگر کاربر راهبر است فقط تیکت وجود داشته باشد، اگر کاربر عادی است حتماً مالک آن باشد
+            if user.is_staff:
+                ticket = Ticket.objects.get(id=ticket_id)
+            else:
+                ticket = Ticket.objects.get(id=ticket_id, creator=user)
         except Ticket.DoesNotExist:
             return Response(
                 {"error": "تیکت یافت نشد یا دسترسی ندارید"},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # اگر تیکت خاتمه یافته باشد، اجازه ارسال پیام جدید نمی‌دهیم
+        # بررسی خاتمه یافتن تیکت
         if ticket.status == "CLOSED":
             return Response(
                 {"error": "این تیکت خاتمه یافته است و امکان ارسال پاسخ وجود ندارد"},
@@ -185,10 +171,66 @@ class SendReplyAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # ایجاد پیام جدید در چت روم تیکت
         new_msg = TicketMessage.objects.create(
-            ticket=ticket, sender=request.user, message_text=message_text
+            ticket=ticket, sender=user, message_text=message_text
         )
 
         return Response(
             {"message": "پاسخ شما با موفقیت ثبت شد"}, status=status.HTTP_201_CREATED
+        )
+
+
+class AssignTicketAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, ticket_id):
+        # فقط مدیران (Superuser) اجازه ارجاع تیکت دارند
+        if not request.user.is_superuser:
+            return Response(
+                {"error": "تنها مدیر سیستم اجازه ارجاع تیکت‌ها را دارد."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        try:
+            ticket = Ticket.objects.get(id=ticket_id)
+        except Ticket.DoesNotExist:
+            return Response(
+                {"error": "تیکت یافت نشد."}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        handler_id = request.data.get("handler_id")
+        if not handler_id:
+            return Response(
+                {"error": "شناسه راهبر ارسال نشده است."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            handler_user = User.objects.get(id=handler_id, is_staff=True)
+        except User.DoesNotExist:
+            return Response(
+                {"error": "کارشناس معتبری با این شناسه یافت نشد."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # ارجاع تیکت به کارشناس و تغییر وضعیت به در جریان (ASSIGNED یا IN_PROGRESS)
+        if hasattr(ticket, "current_handler"):
+            ticket.current_handler = handler_user
+        elif hasattr(ticket, "handler"):
+            ticket.handler = handler_user
+
+        ticket.status = "IN_PROGRESS"  # یا هر وضعیتی که برای ارجاع در نظر دارید
+        ticket.save()
+
+        # ثبت یک پیام سیستمی درون چت‌روم تیکت جهت اطلاع
+        TicketMessage.objects.create(
+            ticket=ticket,
+            sender=request.user,
+            message_text=f"🔄 این تیکت توسط مدیر به کارشناس [{handler_user.username}] ارجاع داده شد.",
+        )
+
+        return Response(
+            {"message": f"تیکت با موفقیت به {handler_user.username} ارجاع شد."},
+            status=status.HTTP_200_OK,
         )

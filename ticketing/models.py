@@ -106,13 +106,9 @@ class TicketMessage(models.Model):
     )
     sender = models.ForeignKey(User, on_delete=models.CASCADE, verbose_name="فرستنده")
     message_text = models.TextField(verbose_name="متن پیام")
-    # created_at = models.DateTimeField(auto_now_add=True, verbose_name="زمان ارسال")
     created_at = jmodels.jDateTimeField(auto_now_add=True, verbose_name="زمان ارسال")
 
     class Meta:
         ordering = ["created_at"]
         verbose_name = "پیام"
         verbose_name_plural = "روال گفتگو"
-
-
-# این مدل را به فایل models.py قبلی اضافه کنید:
